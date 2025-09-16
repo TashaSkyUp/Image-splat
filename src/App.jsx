@@ -365,6 +365,57 @@ function makeWorker() {
   return { worker: w, url }
 }
 
+const buttonBase =
+  'inline-flex items-center justify-center gap-2 rounded-full px-4 py-2 text-sm font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-sky-400 focus-visible:ring-offset-slate-950 disabled:cursor-not-allowed disabled:opacity-60'
+const primaryButton =
+  buttonBase +
+  ' bg-gradient-to-r from-sky-500 to-cyan-400 text-slate-950 shadow-lg shadow-sky-500/30 hover:from-sky-400 hover:to-cyan-300'
+const secondaryButton =
+  buttonBase + ' border border-white/15 bg-white/10 text-slate-50 hover:bg-white/20'
+const ghostButton = buttonBase + ' border border-white/10 bg-transparent text-slate-200 hover:bg-white/10'
+
+const inputClass =
+  'w-full rounded-xl border border-white/15 bg-slate-950/40 px-3 py-2 text-sm text-slate-50 shadow-inner shadow-black/40 transition focus:border-sky-300 focus:outline-none focus:ring-2 focus:ring-sky-400/40 placeholder:text-slate-400'
+
+const glassCardClass =
+  'rounded-3xl border border-white/10 bg-white/10 p-6 shadow-2xl shadow-slate-950/40 ring-1 ring-white/10 backdrop-blur'
+const metricCardClass = 'rounded-2xl border border-white/10 bg-slate-900/60 px-4 py-3 shadow-inner shadow-black/40'
+
+const statusBadgeBase =
+  'inline-flex items-center gap-2 rounded-full border px-4 py-2 text-sm font-medium shadow-sm backdrop-blur'
+const statusStyles = {
+  idle: {
+    label: 'Idle',
+    classes: 'border-white/10 bg-white/10 text-slate-200',
+    dot: 'bg-slate-200',
+  },
+  loaded: {
+    label: 'Ready',
+    classes: 'border-emerald-400/30 bg-emerald-500/15 text-emerald-100',
+    dot: 'bg-emerald-300',
+  },
+  initializing: {
+    label: 'Initializing',
+    classes: 'border-indigo-400/40 bg-indigo-500/20 text-indigo-100',
+    dot: 'bg-indigo-300',
+  },
+  training: {
+    label: 'Training',
+    classes: 'border-sky-400/40 bg-sky-500/20 text-sky-100',
+    dot: 'bg-sky-300',
+  },
+  stopped: {
+    label: 'Stopped',
+    classes: 'border-amber-400/40 bg-amber-500/20 text-amber-100',
+    dot: 'bg-amber-300',
+  },
+  done: {
+    label: 'Finished',
+    classes: 'border-emerald-400/40 bg-emerald-500/15 text-emerald-100',
+    dot: 'bg-emerald-300',
+  },
+}
+
 function Diagnostics() {
   const [diag, setDiag] = useState('idle')
   const run = async () => {
@@ -431,11 +482,11 @@ function Diagnostics() {
     }
   }
   return (
-    <div className="ml-2 inline-flex items-center gap-2">
-      <button className="px-3 py-2 rounded border" onClick={run}>
-        Diagnostics
+    <div className="flex items-center gap-3 text-slate-300">
+      <button className={ghostButton} onClick={run}>
+        Run diagnostics
       </button>
-      <span className="text-sm text-gray-600">{diag}</span>
+      <span className="text-xs font-medium uppercase tracking-wide text-slate-400">{diag}</span>
     </div>
   )
 }
@@ -465,6 +516,7 @@ export default function ImageGSApp() {
   const [poolSize, setPoolSize] = useState(defaultPool)
 
   const canvasRef = useRef(null)
+  const fileInputRef = useRef(null)
   const stopRef = useRef(false)
   const varsRef = useRef(null)
   const curNgRef = useRef(0)
@@ -616,6 +668,8 @@ export default function ImageGSApp() {
     } catch (err) {
       console.error('handleFile failed', err)
       window.alert(`Failed to load image.\n\nReason: ${err?.message || err}`)
+    } finally {
+      if (e.target) e.target.value = ''
     }
   }
 
@@ -939,231 +993,370 @@ export default function ImageGSApp() {
     a.click()
   }
 
+
+  const statusMeta =
+    statusStyles[status] ?? {
+      ...statusStyles.idle,
+      label: status ? status.charAt(0).toUpperCase() + status.slice(1) : statusStyles.idle.label,
+    }
+  const psnrDisplay = Number.isFinite(metrics.psnr) ? metrics.psnr?.toFixed?.(2) : '—'
+  const imageDimensions =
+    imgSize.w && imgSize.h ? `${imgSize.w}×${imgSize.h}` : '—'
+  const gaussianCount = curNgRef.current
+  const gaussianDisplay = Number.isFinite(gaussianCount) ? gaussianCount.toLocaleString() : '—'
+  const stepDisplay = Number.isFinite(metrics.step) ? metrics.step.toLocaleString() : '0'
+  const poolDisplay = Number.isFinite(metrics.pool) ? metrics.pool.toLocaleString() : '—'
+
   return (
-    <div className="w-full min-h-screen p-6 flex flex-col gap-4">
-      <h1 className="text-2xl font-bold">Image-GS — 2D Gaussians (JS-only, Worker Pool)</h1>
-      <div className="text-sm text-gray-600">
-        CSP-safe • No TFJS/WebGL/WASM • Preview auto-downscales ≤512px • Render/EM offloaded to a pool of Web Workers
+    <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
+      <div className="pointer-events-none absolute inset-0 -z-10 overflow-hidden">
+        <div className="absolute left-1/2 top-[-30%] h-[560px] w-[560px] -translate-x-1/2 rounded-full bg-sky-500/20 blur-3xl" />
+        <div className="absolute bottom-[-20%] right-[-10%] h-[460px] w-[460px] rounded-full bg-cyan-500/15 blur-3xl" />
+        <div className="absolute inset-0 bg-[linear-gradient(135deg,rgba(15,23,42,0.85),rgba(2,6,23,0.95))]" />
       </div>
 
-      <div className="flex flex-wrap gap-4 items-center">
-        <input type="file" accept="image/*" onChange={handleFile} />
-        <button
-          className="px-3 py-2 rounded bg-black text-white disabled:opacity-60"
-          onClick={train}
-          disabled={!imgJS || status === 'training'}
-        >
-          {status === 'training' ? 'Training…' : 'Train'}
-        </button>
-        <button className="px-3 py-2 rounded border" onClick={handleRenderOnce} disabled={!imgJS}>
-          Render once
-        </button>
-        <button className="px-3 py-2 rounded border" onClick={handleStop}>
-          Stop
-        </button>
-        <button
-          className="px-3 py-2 rounded border disabled:opacity-60"
-          onClick={handleSaveModel}
-          disabled={!imgJS || !varsRef.current}
-        >
-          Save .igs
-        </button>
-        <Diagnostics />
-      </div>
-
-      <div className="grid grid-cols-1 gap-6 md:grid-cols-2">
-        <div className="flex flex-col gap-2">
-          <div className="flex flex-wrap gap-4 items-end">
-            <label className="flex items-center gap-2">
-              K
-              <input
-                type="number"
-                value={K}
-                min={1}
-                max={64}
-                onChange={(e) => setK(parseInt(e.target.value, 10) || 1)}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Budget (N)
-              <input
-                type="number"
-                value={budget}
-                min={128}
-                max={20000}
-                onChange={(e) => setBudget(parseInt(e.target.value, 10) || 128)}
-                className="border p-1 w-28 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              λ_init
-              <input
-                type="number"
-                step="0.05"
-                value={lambdaInit}
-                min={0}
-                max={1}
-                onChange={(e) => setLambdaInit(parseFloat(e.target.value) || 0)}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Steps
-              <input
-                type="number"
-                value={steps}
-                min={100}
-                max={20000}
-                onChange={(e) => setSteps(parseInt(e.target.value, 10) || 100)}
-                className="border p-1 w-28 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Delay (ms)
-              <input
-                type="number"
-                value={stepDelayMs}
-                min={0}
-                max={1000}
-                onChange={(e) => setStepDelayMs(parseInt(e.target.value, 10) || 0)}
-                className="border p-1 w-28 rounded"
-              />
-            </label>
+      <div className="relative mx-auto flex w-full max-w-6xl flex-col gap-10 px-6 py-12 lg:px-10">
+        <header className="space-y-6">
+          <div className="flex flex-col gap-6 lg:flex-row lg:items-start lg:justify-between">
+            <div className="space-y-4">
+              <span className="inline-flex w-fit items-center gap-2 rounded-full border border-white/10 bg-white/10 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-slate-300/80">
+                Portfolio build
+              </span>
+              <h1 className="text-4xl font-semibold tracking-tight text-white sm:text-5xl">
+                Image-GS — 2D Gaussian Splatting in the Browser
+              </h1>
+              <p className="max-w-2xl text-base text-slate-300">
+                Upload an image and watch a pool of web workers optimize a Gaussian splat representation in real time. The entire experience runs on pure JavaScript – no WebGL, WASM, or server renderers required.
+              </p>
+            </div>
+            <span className={`${statusBadgeBase} ${statusMeta.classes}`}>
+              <span className={`h-2.5 w-2.5 rounded-full ${statusMeta.dot}`} />
+              Status: {statusMeta.label}
+            </span>
           </div>
-
-          <div className="flex flex-wrap gap-4 items-end">
-            <label className="flex items-center gap-2">
-              Pool size
-              <input
-                type="number"
-                value={poolSize}
-                min={1}
-                max={16}
-                onChange={(e) => setPoolSize(clamp(parseInt(e.target.value, 10) || 1, 1, 16))}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Tiling
-              <input
-                type="checkbox"
-                checked={enableTiling}
-                onChange={(e) => {
-                  setEnableTiling(e.target.checked)
-                  broadcastSetTiling()
-                }}
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Tile W
-              <input
-                type="number"
-                value={tileW}
-                min={8}
-                max={128}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10) || 32
-                  setTileW(v)
-                  broadcastSetTiling()
-                }}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Tile H
-              <input
-                type="number"
-                value={tileH}
-                min={8}
-                max={128}
-                onChange={(e) => {
-                  const v = parseInt(e.target.value, 10) || 32
-                  setTileH(v)
-                  broadcastSetTiling()
-                }}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              Rebin every
-              <input
-                type="number"
-                value={rebinEvery}
-                min={0}
-                max={500}
-                onChange={(e) => setRebinEvery(parseInt(e.target.value, 10) || 0)}
-                className="border p-1 w-28 rounded"
-              />
-            </label>
-          </div>
-
-          <div className="flex flex-wrap gap-4 items-end">
-            <label className="flex items-center gap-2">
-              LR Color
-              <input
-                type="number"
-                step="0.05"
-                value={lrColor}
-                min={0.05}
-                max={1}
-                onChange={(e) => setLrColor(parseFloat(e.target.value) || 0.4)}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              LR μ
-              <input
-                type="number"
-                step="0.05"
-                value={lrMu}
-                min={0.05}
-                max={1}
-                onChange={(e) => setLrMu(parseFloat(e.target.value) || 0.25)}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-            <label className="flex items-center gap-2">
-              LR shape
-              <input
-                type="number"
-                step="0.05"
-                value={lrShape}
-                min={0.05}
-                max={1}
-                onChange={(e) => setLrShape(parseFloat(e.target.value) || 0.25)}
-                className="border p-1 w-24 rounded"
-              />
-            </label>
-          </div>
-
-          <div className="text-sm text-gray-600">
-            Image: {imgSize.w}×{imgSize.h} • Gaussians: {curNgRef.current} • Step: {metrics.step} • Pool: {metrics.pool}
-          </div>
-          <div className="text-sm">
-            PSNR: {Number.isFinite(metrics.psnr) ? metrics.psnr?.toFixed?.(2) : '—'} dB
-          </div>
-
-          <canvas ref={canvasRef} className="rounded-xl shadow border bg-white" />
-        </div>
-        <div className="prose max-w-none">
-          <h2 className="font-semibold">Worker pool</h2>
-          <p>
-            This build runs the renderer/EM across a <b>pool</b> of workers (default ≈ your core count). The image is partitioned
-            into row stripes; each worker returns partial accumulators and (when requested) its image stripe. The main thread
-            reduces accumulators and composites the frame. UI still draws at a fixed ~10 Hz.
+          <p className="max-w-3xl text-sm text-slate-400">
+            Drag in a photo, tune the parameters, and the renderer will progressively refine the preview. This build is CSP-safe, uses dedicated web workers for EM updates, and automatically downsamples sources to 512px for responsive demos.
           </p>
-          <h2 className="font-semibold mt-4">Rebin</h2>
-          <p>
-            <b>Rebin</b> rebuilds each worker’s tile→Gaussian bins when μ/θ/s⁻¹ change, so per-pixel work remains local (O(K)). We
-            keep it inside each worker for simplicity; if profiling shows duplication is hot, we can broadcast a compressed CSR
-            index instead.
-          </p>
-          <h2 className="font-semibold mt-4">Preview size</h2>
-          <p>
-            Inputs are auto-downscaled to ≤512px long side before training to keep compute predictable. We can expose this if you
-            want to tune it.
-          </p>
+        </header>
+
+        <div className="grid gap-10 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
+          <section className="space-y-8">
+            <div className={glassCardClass}>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-wrap items-center gap-3">
+                  <input
+                    ref={fileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleFile}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    className={secondaryButton}
+                    onClick={() => fileInputRef.current?.click()}
+                  >
+                    Upload image
+                  </button>
+                  <button
+                    className={primaryButton}
+                    onClick={train}
+                    disabled={!imgJS || status === 'training'}
+                  >
+                    {status === 'training' ? 'Training…' : 'Train'}
+                  </button>
+                  <button className={secondaryButton} onClick={handleRenderOnce} disabled={!imgJS}>
+                    Render once
+                  </button>
+                  <button className={ghostButton} onClick={handleStop}>
+                    Stop
+                  </button>
+                  <button
+                    className={ghostButton}
+                    onClick={handleSaveModel}
+                    disabled={!imgJS || !varsRef.current}
+                  >
+                    Save .igs
+                  </button>
+                  <Diagnostics />
+                </div>
+                <p className="text-sm text-slate-400">
+                  Training spawns a worker pool sized to your CPU. Capture a snapshot at any time or export the learned splats as a compact <code className="rounded bg-white/10 px-1 py-0.5 text-xs">.igs</code> file.
+                </p>
+              </div>
+            </div>
+
+            <div className={glassCardClass}>
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Training parameters</h2>
+                  <p className="mt-2 text-sm text-slate-400">
+                    Refine the optimization budget, tiling strategy, and learning rates to balance speed and fidelity.
+                  </p>
+                </div>
+
+                <div className="space-y-6">
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                      Core setup
+                    </h3>
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">K</span>
+                        <input
+                          type="number"
+                          value={K}
+                          min={1}
+                          max={64}
+                          onChange={(e) => setK(parseInt(e.target.value, 10) || 1)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Budget (N)</span>
+                        <input
+                          type="number"
+                          value={budget}
+                          min={128}
+                          max={20000}
+                          onChange={(e) => setBudget(parseInt(e.target.value, 10) || 128)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">λ_init</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={lambdaInit}
+                          min={0}
+                          max={1}
+                          onChange={(e) => setLambdaInit(parseFloat(e.target.value) || 0)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Steps</span>
+                        <input
+                          type="number"
+                          value={steps}
+                          min={100}
+                          max={20000}
+                          onChange={(e) => setSteps(parseInt(e.target.value, 10) || 100)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Delay (ms)</span>
+                        <input
+                          type="number"
+                          value={stepDelayMs}
+                          min={0}
+                          max={1000}
+                          onChange={(e) => setStepDelayMs(parseInt(e.target.value, 10) || 0)}
+                          className={inputClass}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                      Worker pool
+                    </h3>
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Pool size</span>
+                        <input
+                          type="number"
+                          value={poolSize}
+                          min={1}
+                          max={16}
+                          onChange={(e) => setPoolSize(clamp(parseInt(e.target.value, 10) || 1, 1, 16))}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300 sm:col-span-2 xl:col-span-1">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Tiling</span>
+                        <div className="flex items-center gap-3 rounded-xl border border-white/10 bg-slate-950/50 px-4 py-3">
+                          <input
+                            type="checkbox"
+                            checked={enableTiling}
+                            onChange={(e) => {
+                              setEnableTiling(e.target.checked)
+                              broadcastSetTiling()
+                            }}
+                            className="h-5 w-5 rounded border-white/30 bg-slate-900/70 accent-sky-400 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-offset-1 focus-visible:ring-sky-400/60 focus-visible:ring-offset-slate-950"
+                          />
+                          <span className="text-sm text-slate-300">
+                            {enableTiling ? 'Enabled' : 'Disabled'}
+                          </span>
+                        </div>
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Tile W</span>
+                        <input
+                          type="number"
+                          value={tileW}
+                          min={8}
+                          max={128}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10) || 32
+                            setTileW(v)
+                            broadcastSetTiling()
+                          }}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Tile H</span>
+                        <input
+                          type="number"
+                          value={tileH}
+                          min={8}
+                          max={128}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10) || 32
+                            setTileH(v)
+                            broadcastSetTiling()
+                          }}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Rebin every</span>
+                        <input
+                          type="number"
+                          value={rebinEvery}
+                          min={0}
+                          max={500}
+                          onChange={(e) => setRebinEvery(parseInt(e.target.value, 10) || 0)}
+                          className={inputClass}
+                        />
+                      </label>
+                    </div>
+                  </div>
+
+                  <div>
+                    <h3 className="text-xs font-semibold uppercase tracking-[0.2em] text-slate-400">
+                      Learning rates
+                    </h3>
+                    <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">LR Color</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={lrColor}
+                          min={0.05}
+                          max={1}
+                          onChange={(e) => setLrColor(parseFloat(e.target.value) || 0.4)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">LR μ</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={lrMu}
+                          min={0.05}
+                          max={1}
+                          onChange={(e) => setLrMu(parseFloat(e.target.value) || 0.25)}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">LR shape</span>
+                        <input
+                          type="number"
+                          step="0.05"
+                          value={lrShape}
+                          min={0.05}
+                          max={1}
+                          onChange={(e) => setLrShape(parseFloat(e.target.value) || 0.25)}
+                          className={inputClass}
+                        />
+                      </label>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            <div className={glassCardClass}>
+              <div className="flex flex-col gap-6">
+                <div className="flex flex-col gap-2">
+                  <h2 className="text-lg font-semibold text-white">Live preview</h2>
+                  <p className="text-sm text-slate-400">
+                    Workers composite a new frame roughly every 100&nbsp;ms. Capture progress or inspect the final result below.
+                  </p>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">Image</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{imageDimensions}</p>
+                  </div>
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">Gaussians</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{gaussianDisplay}</p>
+                  </div>
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">Step</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{stepDisplay}</p>
+                  </div>
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">PSNR</p>
+                    <p className="mt-1 text-lg font-semibold text-white">
+                      {psnrDisplay}
+                      {psnrDisplay !== '—' && (
+                        <span className="ml-1 text-xs font-medium text-slate-400">dB</span>
+                      )}
+                    </p>
+                  </div>
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">Worker pool</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{poolDisplay}</p>
+                  </div>
+                </div>
+                <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-[0_25px_50px_-12px_rgba(15,23,42,0.8)] ring-1 ring-white/10">
+                  <canvas ref={canvasRef} className="block h-auto w-full" />
+                </div>
+              </div>
+            </div>
+          </section>
+
+          <aside className="space-y-8">
+            <div className={glassCardClass}>
+              <div className="prose prose-invert max-w-none">
+                <h2>Under the hood</h2>
+                <p>
+                  Each optimization step fans out across a dedicated worker pool sized to your hardware. Workers operate on row stripes, return partial accumulators, and the main thread simply reduces and composites the frame at a steady cadence.
+                </p>
+                <h3>Adaptive tiling</h3>
+                <p>
+                  Keep tiling enabled to maintain roughly O(K) work per pixel. Rebin schedules rebuild each worker&apos;s tile→Gaussian bins whenever μ, θ, or σ⁻¹ drift, keeping hot spots responsive without reloading the model.
+                </p>
+                <h3>Preview sizing</h3>
+                <p>
+                  Inputs are automatically scaled so the longest edge is 512&nbsp;px. It keeps demos smooth while preserving enough detail for crisp exports and portfolio-ready screen captures.
+                </p>
+                <h3>Next steps</h3>
+                <ul>
+                  <li>Increase the budget and lower learning rates for photorealistic reconstructions.</li>
+                  <li>Toggle tiling off to profile the difference in worker throughput.</li>
+                  <li>Export a <code>.igs</code> file and embed the splats in another project.</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="rounded-3xl border border-sky-500/30 bg-sky-500/10 p-6 shadow-xl shadow-sky-900/40 backdrop-blur">
+              <h3 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-100">Tip</h3>
+              <p className="mt-3 text-sm text-slate-100/80">
+                Square images converge fastest, but any aspect ratio works. Pair this viewer with a static site host and you&apos;ve got a performant, CSP-friendly Gaussian splat demo ready for your portfolio.
+              </p>
+            </div>
+          </aside>
         </div>
       </div>
     </div>
