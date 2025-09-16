@@ -481,12 +481,16 @@ function destroyPool() {
   for (const w of pool.workers) {
     try {
       w.terminate();
-    } catch (e) {}
+    } catch (e) {
+      console.warn("Failed to terminate worker:", e);
+    }
   }
   for (const u of pool.urls) {
     try {
       URL.revokeObjectURL(u);
-    } catch (e) {}
+    } catch (e) {
+      console.warn("Failed to revoke worker URL:", e);
+    }
   }
   pool.workers = [];
   pool.urls = [];
