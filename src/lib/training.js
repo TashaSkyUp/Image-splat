@@ -30,6 +30,12 @@ export function mergeAccumulators(parts, N) {
   const accXX = new Float32Array(N)
   const accYY = new Float32Array(N)
   const accXY = new Float32Array(N)
+  const accErrW = new Float32Array(N)
+  const accErrX = new Float32Array(N)
+  const accErrY = new Float32Array(N)
+  const accErrXX = new Float32Array(N)
+  const accErrYY = new Float32Array(N)
+  const accErrXY = new Float32Array(N)
   for (const p of parts) {
     const aW = p.accW
     const aT = p.accTW
@@ -38,6 +44,12 @@ export function mergeAccumulators(parts, N) {
     const aXX = p.accXX
     const aYY = p.accYY
     const aXY = p.accXY
+    const aErrW = p.accErrW
+    const aErrX = p.accErrX
+    const aErrY = p.accErrY
+    const aErrXX = p.accErrXX
+    const aErrYY = p.accErrYY
+    const aErrXY = p.accErrXY
     for (let i = 0; i < N; i++) accW[i] += aW[i]
     for (let i = 0; i < N * 3; i++) accTW[i] += aT[i]
     for (let i = 0; i < N; i++) {
@@ -46,9 +58,29 @@ export function mergeAccumulators(parts, N) {
       accXX[i] += aXX[i]
       accYY[i] += aYY[i]
       accXY[i] += aXY[i]
+      if (aErrW) accErrW[i] += aErrW[i]
+      if (aErrX) accErrX[i] += aErrX[i]
+      if (aErrY) accErrY[i] += aErrY[i]
+      if (aErrXX) accErrXX[i] += aErrXX[i]
+      if (aErrYY) accErrYY[i] += aErrYY[i]
+      if (aErrXY) accErrXY[i] += aErrXY[i]
     }
   }
-  return { accW, accTW, accX, accY, accXX, accYY, accXY }
+  return {
+    accW,
+    accTW,
+    accX,
+    accY,
+    accXX,
+    accYY,
+    accXY,
+    accErrW,
+    accErrX,
+    accErrY,
+    accErrXX,
+    accErrYY,
+    accErrXY,
+  }
 }
 
 export function composeOutput(parts, W, H) {
@@ -78,18 +110,24 @@ export function updateParametersFromAccumulators(vars, accumulators, config) {
   }
   const stdMinX = 1 / Math.max(w - 1, 1)
   const stdMinY = 1 / Math.max(h - 1, 1)
+  const accErrW = accumulators.accErrW ?? accumulators.accW
+  const accErrX = accumulators.accErrX ?? accumulators.accX
+  const accErrY = accumulators.accErrY ?? accumulators.accY
+  const accErrXX = accumulators.accErrXX ?? accumulators.accXX
+  const accErrYY = accumulators.accErrYY ?? accumulators.accYY
+  const accErrXY = accumulators.accErrXY ?? accumulators.accXY
   for (let i = 0; i < N; i++) {
-    const wsum = accumulators.accW[i]
+    const wsum = accErrW[i]
     if (wsum < 1e-6) continue
-    const mx = accumulators.accX[i] / wsum
-    const my = accumulators.accY[i] / wsum
+    const mx = accErrX[i] / wsum
+    const my = accErrY[i] / wsum
     const muX = vars.mu[i * 2 + 0]
     const muY = vars.mu[i * 2 + 1]
     vars.mu[i * 2 + 0] = (1 - lrMu) * muX + lrMu * mx
     vars.mu[i * 2 + 1] = (1 - lrMu) * muY + lrMu * my
-    const cxx = Math.max(0, accumulators.accXX[i] / wsum - mx * mx)
-    const cyy = Math.max(0, accumulators.accYY[i] / wsum - my * my)
-    const cxy = accumulators.accXY[i] / wsum - mx * my
+    const cxx = Math.max(0, accErrXX[i] / wsum - mx * mx)
+    const cyy = Math.max(0, accErrYY[i] / wsum - my * my)
+    const cxy = accErrXY[i] / wsum - mx * my
     const tr = cxx + cyy
     const det = cxx * cyy - cxy * cxy
     const disc = Math.max(0, tr * tr - 4 * det)
