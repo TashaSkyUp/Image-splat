@@ -49,6 +49,12 @@ export const WORKER_SRC = `
     const accXX = new Float32Array(N);
     const accYY = new Float32Array(N);
     const accXY = new Float32Array(N);
+    const accErrW = new Float32Array(N);
+    const accErrX = new Float32Array(N);
+    const accErrY = new Float32Array(N);
+    const accErrXX = new Float32Array(N);
+    const accErrYY = new Float32Array(N);
+    const accErrXY = new Float32Array(N);
 
     const tilesX = bins ? bins.tilesX : Math.ceil(W / tileW);
     const tilesY = bins ? bins.tilesY : Math.ceil(H / tileH);
@@ -115,9 +121,12 @@ export const WORKER_SRC = `
             let wsum = EPS;
             for (let k = 0; k < topVal.length; k++) wsum += topVal[k];
             const baseGlobal = (y * W + x) * 3;
+            const cxn = cx;
+            const cyn = cy;
             let r = 0, g = 0, b = 0;
             for (let k = 0; k < topIdx.length; k++) {
               const wi = topVal[k] / wsum;
+              topVal[k] = wi;
               const gi = topIdx[k];
               r += wi * color[gi * 3 + 0];
               g += wi * color[gi * 3 + 1];
@@ -126,12 +135,30 @@ export const WORKER_SRC = `
               accTW[gi * 3 + 0] += wi * IMG[baseGlobal + 0];
               accTW[gi * 3 + 1] += wi * IMG[baseGlobal + 1];
               accTW[gi * 3 + 2] += wi * IMG[baseGlobal + 2];
-              const cxn = cx, cyn = cy;
               accX[gi] += wi * cxn;
               accY[gi] += wi * cyn;
               accXX[gi] += wi * cxn * cxn;
               accYY[gi] += wi * cyn * cyn;
               accXY[gi] += wi * cxn * cyn;
+            }
+            const tR = IMG[baseGlobal + 0];
+            const tG = IMG[baseGlobal + 1];
+            const tB = IMG[baseGlobal + 2];
+            const residual =
+              (Math.abs(tR - r) + Math.abs(tG - g) + Math.abs(tB - b)) / 3;
+            const cx2 = cxn * cxn;
+            const cy2 = cyn * cyn;
+            const cxy = cxn * cyn;
+            for (let k = 0; k < topIdx.length; k++) {
+              const gi = topIdx[k];
+              const wi = topVal[k];
+              const wErr = wi * residual;
+              accErrW[gi] += wErr;
+              accErrX[gi] += wErr * cxn;
+              accErrY[gi] += wErr * cyn;
+              accErrXX[gi] += wErr * cx2;
+              accErrYY[gi] += wErr * cy2;
+              accErrXY[gi] += wErr * cxy;
             }
             if (out) {
               const row = y - y0Stripe;
@@ -145,8 +172,40 @@ export const WORKER_SRC = `
       }
     }
 
-    const msg = { type: 'stepResult', reqId, accW, accTW, accX, accY, accXX, accYY, accXY, y0: y0Stripe, y1: y1Stripe };
-    const transfers = [accW.buffer, accTW.buffer, accX.buffer, accY.buffer, accXX.buffer, accYY.buffer, accXY.buffer];
+    const msg = {
+      type: 'stepResult',
+      reqId,
+      accW,
+      accTW,
+      accX,
+      accY,
+      accXX,
+      accYY,
+      accXY,
+      accErrW,
+      accErrX,
+      accErrY,
+      accErrXX,
+      accErrYY,
+      accErrXY,
+      y0: y0Stripe,
+      y1: y1Stripe,
+    };
+    const transfers = [
+      accW.buffer,
+      accTW.buffer,
+      accX.buffer,
+      accY.buffer,
+      accXX.buffer,
+      accYY.buffer,
+      accXY.buffer,
+      accErrW.buffer,
+      accErrX.buffer,
+      accErrY.buffer,
+      accErrXX.buffer,
+      accErrYY.buffer,
+      accErrXY.buffer,
+    ];
     if (out) {
       msg.out = out;
       transfers.push(out.buffer);
