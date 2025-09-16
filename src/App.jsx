@@ -67,11 +67,21 @@ const statusStyles = {
   },
 }
 
+const MAX_HISTORY_POINTS = 720
+
 export default function ImageGSApp() {
   const [imgJS, setImgJS] = useState(null)
   const [imgSize, setImgSize] = useState({ w: 0, h: 0 })
   const [status, setStatus] = useState('idle')
-  const [metrics, setMetrics] = useState({ step: 0, psnr: null, n: 0, mode: 'js', worker: true, pool: 1 })
+  const [metrics, setMetrics] = useState({
+    step: 0,
+    psnr: null,
+    n: 0,
+    mode: 'js',
+    worker: true,
+    pool: 1,
+    igsBytes: null,
+  })
 
   const [K, setK] = useState(6)
   const [budget, setBudget] = useState(2000)
@@ -92,6 +102,13 @@ export default function ImageGSApp() {
   const defaultPool = Math.max(2, Math.min(navigator.hardwareConcurrency || 4, 8))
   const [poolSize, setPoolSize] = useState(defaultPool)
 
+  const [psnrHistory, setPsnrHistory] = useState([])
+  const [compressionHistory, setCompressionHistory] = useState([])
+  const [baselineSizes, setBaselineSizes] = useState({ source: null, png: null, jpg: null })
+  const baselineRef = useRef(baselineSizes)
+  const baselineJobRef = useRef(0)
+  const runStartedAtRef = useRef(null)
+
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
   const stopRef = useRef(false)
@@ -109,6 +126,10 @@ export default function ImageGSApp() {
   useEffect(() => {
     rebuildPool(poolSize, true)
   }, [poolSize])
+
+  useEffect(() => {
+    baselineRef.current = baselineSizes
+  }, [baselineSizes])
 
   function destroyPool() {
     const pool = poolRef.current
@@ -239,6 +260,12 @@ export default function ImageGSApp() {
       setImgJS({ data: localData, w: js.w, h: js.h })
       setImgSize({ w: js.w, h: js.h })
       drawOnCanvasF32RGB(localData, js.w, js.h)
+      setMetrics({ step: 0, psnr: null, n: 0, mode: 'js', worker: true, pool: poolSize, igsBytes: null })
+      setPsnrHistory([])
+      setCompressionHistory([])
+      setBaselineSizes({ source: file.size ?? null, png: null, jpg: null })
+      runStartedAtRef.current = null
+      computeBaselines({ data: localData, w: js.w, h: js.h }, file.size ?? null)
       disposeVars()
       broadcastInitImage({ data: localData, w: js.w, h: js.h })
       setStatus('loaded')
@@ -253,6 +280,33 @@ export default function ImageGSApp() {
   function disposeVars() {
     varsRef.current = null
     curNgRef.current = 0
+  }
+
+  async function computeBaselines(image, fileSize) {
+    if (!image || typeof document === 'undefined' || typeof ImageData === 'undefined') return
+    const jobId = baselineJobRef.current + 1
+    baselineJobRef.current = jobId
+    setBaselineSizes({ source: fileSize ?? null, png: null, jpg: null })
+    try {
+      const imgData = floatImageToImageData(image)
+      if (!imgData) return
+      const [pngSize, jpgSize] = await Promise.all([
+        encodeImageFromImageData(imgData, 'image/png'),
+        encodeImageFromImageData(imgData, 'image/jpeg', 0.92),
+      ])
+      if (baselineJobRef.current === jobId) {
+        setBaselineSizes({
+          source: fileSize ?? null,
+          png: pngSize ?? null,
+          jpg: jpgSize ?? null,
+        })
+      }
+    } catch (err) {
+      console.error('computeBaselines failed', err)
+      if (baselineJobRef.current === jobId) {
+        setBaselineSizes({ source: fileSize ?? null, png: null, jpg: null })
+      }
+    }
   }
 
   async function initParamsJS() {
@@ -278,7 +332,19 @@ export default function ImageGSApp() {
     if (!imgJS) return
     setStatus('initializing')
     stopRef.current = false
+    setPsnrHistory([])
+    setCompressionHistory([])
+    runStartedAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now()
     await initParamsJS()
+    const initialBytes = estimateIgsSizeBytes(varsRef.current, imgSize)
+    setMetrics((prev) => ({
+      ...prev,
+      step: 0,
+      psnr: null,
+      n: curNgRef.current,
+      igsBytes: initialBytes,
+    }))
+    recordModelStats(0, { psnr: null, igsBytes: initialBytes })
     try {
       await waitAllReady()
     } catch (e) {
@@ -287,6 +353,42 @@ export default function ImageGSApp() {
     setStatus('training')
     await trainJS_pool()
     setStatus('done')
+  }
+
+  function recordModelStats(step, { psnr, igsBytes }) {
+    const now = typeof performance !== 'undefined' ? performance.now() : Date.now()
+    const startedAt = runStartedAtRef.current
+    const timeSec = typeof startedAt === 'number' ? (now - startedAt) / 1000 : step
+
+    if (Number.isFinite(psnr)) {
+      setPsnrHistory((prev) => {
+        const next = [...prev, { time: timeSec, psnr, step }]
+        if (next.length > MAX_HISTORY_POINTS) next.splice(0, next.length - MAX_HISTORY_POINTS)
+        return next
+      })
+    }
+
+    if (Number.isFinite(igsBytes) && igsBytes > 0) {
+      const base = baselineRef.current
+      const pngBytes = base?.png
+      const jpgBytes = base?.jpg
+      if (Number.isFinite(pngBytes) && pngBytes > 0 && Number.isFinite(jpgBytes) && jpgBytes > 0) {
+        setCompressionHistory((prev) => {
+          const next = [
+            ...prev,
+            {
+              time: timeSec,
+              step,
+              igsBytes,
+              pngRatio: pngBytes / igsBytes,
+              jpgRatio: jpgBytes / igsBytes,
+            },
+          ]
+          if (next.length > MAX_HISTORY_POINTS) next.splice(0, next.length - MAX_HISTORY_POINTS)
+          return next
+        })
+      }
+    }
   }
 
   function applyAccumulatorUpdate(pkg) {
@@ -328,6 +430,8 @@ export default function ImageGSApp() {
     const { w: W, h: H } = imgSize
     const addFrequency = addEvery > 0 ? addEvery : null
 
+    let lastStep = 0
+
     for (let step = 1; step <= steps; step++) {
       if (stopRef.current) break
       const v = varsRef.current
@@ -337,7 +441,8 @@ export default function ImageGSApp() {
       if (!params) break
       const stripes = Math.min(pool.workers.length, H)
       const doRebin = enableTiling && (step === 1 || (rebinEvery > 0 && step % rebinEvery === 0))
-      const wantImage = performance.now() - lastDrawRef.current >= 100
+      const nowTime = typeof performance !== 'undefined' ? performance.now() : Date.now()
+      const wantImage = nowTime - lastDrawRef.current >= 100
 
       const promises = []
       for (let i = 0; i < stripes; i++) {
@@ -350,24 +455,50 @@ export default function ImageGSApp() {
       const merged = mergeAccumulators(results, N)
       applyAccumulatorUpdate(merged)
 
+      const igsBytes = estimateIgsSizeBytes(varsRef.current, imgSize)
+      let ps = null
       if (wantImage) {
         const out = composeOutput(results, W, H)
         drawOnCanvasF32RGB(out, W, H)
-        lastDrawRef.current = performance.now()
-        const ps = psnrJS(out, imgJS.data)
-        setMetrics({ step, psnr: ps, n: curNgRef.current, mode: 'js', worker: true, pool: stripes })
+        lastDrawRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now()
+        ps = psnrJS(out, imgJS.data)
+        setMetrics({
+          step,
+          psnr: ps,
+          n: curNgRef.current,
+          mode: 'js',
+          worker: true,
+          pool: stripes,
+          igsBytes,
+        })
       } else {
-        setMetrics((m) => ({ ...m, step, n: curNgRef.current, pool: stripes }))
+        setMetrics((m) => ({ ...m, step, n: curNgRef.current, pool: stripes, igsBytes }))
       }
+
+      recordModelStats(step, { psnr: ps, igsBytes })
 
       if (addFrequency && step % addFrequency === 0 && curNgRef.current < Ntotal) {
         await addGaussiansByErrorJS(Math.min(addChunk, Ntotal - curNgRef.current))
       }
       if (stepDelayMs > 0) await new Promise((r) => setTimeout(r, stepDelayMs))
+      lastStep = step
     }
 
     const out = await renderFrameViaPool(true)
-    if (out) drawOnCanvasF32RGB(out, imgSize.w, imgSize.h)
+    if (out) {
+      drawOnCanvasF32RGB(out, imgSize.w, imgSize.h)
+      const ps = psnrJS(out, imgJS.data)
+      const igsBytes = estimateIgsSizeBytes(varsRef.current, imgSize)
+      const stepForRecord = lastStep || 0
+      setMetrics((m) => ({
+        ...m,
+        psnr: ps,
+        igsBytes,
+        step: stepForRecord || m.step || 0,
+        n: curNgRef.current,
+      }))
+      recordModelStats(stepForRecord || 0, { psnr: ps, igsBytes })
+    }
   }
 
   async function addGaussiansByErrorJS(nNew) {
@@ -431,6 +562,22 @@ export default function ImageGSApp() {
   const gaussianDisplay = Number.isFinite(gaussianCount) ? gaussianCount.toLocaleString() : '—'
   const stepDisplay = Number.isFinite(metrics.step) ? metrics.step.toLocaleString() : '0'
   const poolDisplay = Number.isFinite(metrics.pool) ? metrics.pool.toLocaleString() : '—'
+  const modelSizeDisplay = formatBytes(metrics.igsBytes)
+  const latestPsnr = psnrHistory.length ? psnrHistory[psnrHistory.length - 1] : null
+  const latestCompression =
+    compressionHistory.length ? compressionHistory[compressionHistory.length - 1] : null
+  const pngRatioDisplay =
+    Number.isFinite(latestCompression?.pngRatio) && latestCompression.pngRatio > 0
+      ? latestCompression.pngRatio >= 10
+        ? latestCompression.pngRatio.toFixed(0)
+        : latestCompression.pngRatio.toFixed(2)
+      : null
+  const jpgRatioDisplay =
+    Number.isFinite(latestCompression?.jpgRatio) && latestCompression.jpgRatio > 0
+      ? latestCompression.jpgRatio >= 10
+        ? latestCompression.jpgRatio.toFixed(0)
+        : latestCompression.jpgRatio.toFixed(2)
+      : null
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-slate-950 text-slate-100">
@@ -460,7 +607,7 @@ export default function ImageGSApp() {
             </span>
           </div>
           <p className="max-w-3xl text-sm text-slate-400">
-            Tailor the experience with production-ready controls. Dedicated worker orchestration keeps playback responsive, while smart 512&nbsp;px preprocessing and CSP-friendly code ensure effortless deployment to high-security environments.
+            Monitor fidelity and compression in real time with the live analytics dashboard while multi-threaded workers keep playback responsive.
           </p>
         </header>
 
@@ -840,6 +987,10 @@ export default function ImageGSApp() {
                     <p className="text-xs uppercase tracking-wide text-slate-400">Worker pool</p>
                     <p className="mt-1 text-lg font-semibold text-white">{poolDisplay}</p>
                   </div>
+                  <div className={metricCardClass}>
+                    <p className="text-xs uppercase tracking-wide text-slate-400">Model size</p>
+                    <p className="mt-1 text-lg font-semibold text-white">{modelSizeDisplay}</p>
+                  </div>
                 </div>
                 <div className="overflow-hidden rounded-3xl border border-white/10 bg-slate-950/70 shadow-[0_25px_50px_-12px_rgba(15,23,42,0.8)] ring-1 ring-white/10">
                   <canvas ref={canvasRef} className="block h-auto w-full" />
@@ -850,37 +1001,437 @@ export default function ImageGSApp() {
 
           <aside className="space-y-8">
             <div className={glassCardClass}>
-              <div className="prose prose-invert max-w-none">
-                <h2>Technology highlights</h2>
-                <p>
-                  Each optimization step fans out across a dedicated worker pool sized to the visitor’s hardware. Workers solve their row stripes in parallel, stream back accumulators, and the main thread composites a fresh frame with cinema-grade cadence.
-                </p>
-                <h3>Adaptive tiling</h3>
-                <p>
-                  Gaussian bins are rebuilt on schedule so hotspots stay responsive without reloading the model. The result is near O(K) complexity per pixel even as splats reshape over time.
-                </p>
-                <h3>Preview sizing</h3>
-                <p>
-                  Sources are automatically scaled to a 512&nbsp;px long edge, preserving crisp detail while ensuring buttery-smooth playback on modern laptops and tablets.
-                </p>
-                <h3>Feature set</h3>
-                <ul>
-                  <li>High budgets with tempered learning rates unlock photorealistic reconstructions.</li>
-                  <li>Tiling controls expose clear performance levers for live demos and deep dives.</li>
-                  <li>Export the learned <code>.igs</code> file to integrate splats into wider client experiences.</li>
-                </ul>
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">PSNR over time</h2>
+                  <p className="mt-2 text-sm text-slate-400">
+                    Track reconstruction fidelity as the optimizer progresses. Measurements update whenever a new frame is rendered.
+                  </p>
+                </div>
+                <TimeSeriesChart
+                  series={[
+                    {
+                      label: 'PSNR (dB)',
+                      color: '#38bdf8',
+                      data: psnrHistory.map((entry) => ({ x: entry.time, y: entry.psnr })),
+                    },
+                  ]}
+                  xLabel="Time (s)"
+                  yLabel="PSNR (dB)"
+                  xFormatter={(value) => `${value.toFixed(1)}s`}
+                  yFormatter={(value) => value.toFixed(1)}
+                  emptyLabel="PSNR measurements will appear once training produces frames."
+                />
+                {latestPsnr ? (
+                  <p className="text-xs text-slate-400">
+                    Latest: step {latestPsnr.step.toLocaleString()} — {latestPsnr.psnr.toFixed(2)} dB
+                  </p>
+                ) : (
+                  <p className="text-xs text-slate-500">Load an image and start training to monitor PSNR.</p>
+                )}
               </div>
             </div>
 
-            <div className="rounded-3xl border border-sky-500/30 bg-sky-500/10 p-6 shadow-xl shadow-sky-900/40 backdrop-blur">
-              <h3 className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-100">Spotlight</h3>
-              <p className="mt-3 text-sm text-slate-100/80">
-                Square imagery converges in record time, yet any aspect ratio renders gracefully. Host the viewer on a static site to deliver an elegant, CSP-friendly Gaussian splat experience to clients worldwide.
-              </p>
+            <div className={glassCardClass}>
+              <div className="flex flex-col gap-6">
+                <div>
+                  <h2 className="text-lg font-semibold text-white">Compression comparison</h2>
+                  <p className="mt-2 text-sm text-slate-400">
+                    Compare the learned splat payload against PNG and JPEG encodings of the same resolution. Ratios refresh in real time as new splats are added.
+                  </p>
+                </div>
+                <TimeSeriesChart
+                  series={[
+                    {
+                      label: 'PNG / .igs',
+                      color: '#a855f7',
+                      data: compressionHistory.map((entry) => ({ x: entry.time, y: entry.pngRatio })),
+                    },
+                    {
+                      label: 'JPEG / .igs',
+                      color: '#f97316',
+                      data: compressionHistory.map((entry) => ({ x: entry.time, y: entry.jpgRatio })),
+                    },
+                  ]}
+                  xLabel="Time (s)"
+                  yLabel="Compression ratio"
+                  xFormatter={(value) => `${value.toFixed(1)}s`}
+                  yFormatter={(value) => (Math.abs(value) >= 10 ? value.toFixed(0) : value.toFixed(2))}
+                  emptyLabel={
+                    baselineSizes.png == null || baselineSizes.jpg == null
+                      ? 'Preparing PNG/JPEG baselines…'
+                      : 'Start training to compare compression ratios.'
+                  }
+                />
+                <div className="flex flex-wrap gap-4 text-xs text-slate-400">
+                  <span>Model size: {modelSizeDisplay}</span>
+                  <span>
+                    PNG: {formatBytes(baselineSizes.png)}
+                    {pngRatioDisplay ? ` (${pngRatioDisplay}×)` : ''}
+                  </span>
+                  <span>
+                    JPEG: {formatBytes(baselineSizes.jpg)}
+                    {jpgRatioDisplay ? ` (${jpgRatioDisplay}×)` : ''}
+                  </span>
+                </div>
+              </div>
             </div>
           </aside>
         </div>
       </div>
     </div>
   )
+}
+
+function estimateIgsSizeBytes(vars, size) {
+  if (!vars || !size?.w || !size?.h) return null
+  const { mu, s_inv: sInv, theta, color } = vars
+  if (!mu || !sInv || !theta || !color) return null
+  const N = mu.length / 2
+  if (!Number.isFinite(N) || N <= 0) return null
+  let headerBytes = 0
+  try {
+    const headerStr = JSON.stringify({ magic: 'IGS1', H: size.h, W: size.w, C: 3, N }) + '\n'
+    if (typeof TextEncoder !== 'undefined') {
+      headerBytes = new TextEncoder().encode(headerStr).length
+    } else {
+      headerBytes = headerStr.length
+    }
+  } catch (err) {
+    console.warn('estimateIgsSizeBytes header encode failed', err)
+    headerBytes = 0
+  }
+  const totalValues = (mu.length || 0) + (sInv.length || 0) + (theta.length || 0) + (color.length || 0)
+  return headerBytes + totalValues * 2
+}
+
+function formatBytes(bytes) {
+  if (!Number.isFinite(bytes)) return '—'
+  if (bytes <= 0) return bytes === 0 ? '0 B' : '—'
+  if (bytes < 1024) return `${bytes.toFixed(0)} B`
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
+  return `${(bytes / (1024 * 1024)).toFixed(2)} MB`
+}
+
+function floatImageToImageData(image) {
+  if (!image) return null
+  const { data, w, h } = image
+  if (!data || !Number.isFinite(w) || !Number.isFinite(h)) return null
+  const width = Math.max(1, Math.floor(w))
+  const height = Math.max(1, Math.floor(h))
+  const out = new Uint8ClampedArray(width * height * 4)
+  for (let i = 0, j = 0; i < width * height; i++) {
+    const r = data[i * 3 + 0] ?? 0
+    const g = data[i * 3 + 1] ?? 0
+    const b = data[i * 3 + 2] ?? 0
+    out[j++] = clamp(Math.round(r * 255), 0, 255)
+    out[j++] = clamp(Math.round(g * 255), 0, 255)
+    out[j++] = clamp(Math.round(b * 255), 0, 255)
+    out[j++] = 255
+  }
+  try {
+    return new ImageData(out, width, height)
+  } catch (err) {
+    console.error('floatImageToImageData failed', err)
+    return null
+  }
+}
+
+async function encodeImageFromImageData(imageData, type, quality) {
+  if (!imageData || typeof document === 'undefined') return null
+  return new Promise((resolve) => {
+    try {
+      const canvas = document.createElement('canvas')
+      canvas.width = imageData.width
+      canvas.height = imageData.height
+      const ctx = canvas.getContext('2d')
+      if (!ctx) {
+        resolve(null)
+        return
+      }
+      ctx.putImageData(imageData, 0, 0)
+      if (typeof canvas.toBlob === 'function') {
+        canvas.toBlob(
+          (blob) => {
+            resolve(blob?.size ?? null)
+          },
+          type,
+          quality,
+        )
+      } else {
+        try {
+          const dataUrl = canvas.toDataURL(type, quality)
+          const comma = dataUrl.indexOf(',')
+          if (comma >= 0) {
+            const base64 = dataUrl.slice(comma + 1)
+            const padding = base64.endsWith('==') ? 2 : base64.endsWith('=') ? 1 : 0
+            resolve(Math.floor((base64.length * 3) / 4) - padding)
+          } else {
+            resolve(null)
+          }
+        } catch (err) {
+          console.error('encodeImageFromImageData fallback failed', err)
+          resolve(null)
+        }
+      }
+    } catch (err) {
+      console.error('encodeImageFromImageData failed', err)
+      resolve(null)
+    }
+  })
+}
+
+function TimeSeriesChart({
+  series = [],
+  xLabel,
+  yLabel,
+  xFormatter,
+  yFormatter,
+  emptyLabel,
+}) {
+  const processedSeries = series.map((s, idx) => {
+    const points = (s.data ?? [])
+      .map((d) => ({ x: Number(d.x), y: Number(d.y) }))
+      .filter((d) => Number.isFinite(d.x) && Number.isFinite(d.y))
+      .sort((a, b) => a.x - b.x)
+    return { ...s, points, _idx: idx }
+  })
+  const allPoints = processedSeries.flatMap((s) => s.points)
+  if (!allPoints.length) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/40 text-sm text-slate-500">
+        {emptyLabel || 'No data yet.'}
+      </div>
+    )
+  }
+
+  const viewWidth = 640
+  const viewHeight = 260
+  const margin = { top: 20, right: 16, bottom: 42, left: 60 }
+  const innerWidth = viewWidth - margin.left - margin.right
+  const innerHeight = viewHeight - margin.top - margin.bottom
+
+  const xValues = allPoints.map((p) => p.x)
+  const yValues = allPoints.map((p) => p.y)
+
+  const actualXMin = Math.min(...xValues)
+  const actualXMax = Math.max(...xValues)
+  let xMin = Math.min(0, actualXMin)
+  let xMax = actualXMax
+  if (!Number.isFinite(xMin) || !Number.isFinite(xMax)) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/40 text-sm text-slate-500">
+        {emptyLabel || 'No data yet.'}
+      </div>
+    )
+  }
+  if (xMax === xMin) xMax = xMin + 1
+
+  const actualYMin = Math.min(...yValues)
+  const actualYMax = Math.max(...yValues)
+  let yMin = actualYMin
+  let yMax = actualYMax
+  if (!Number.isFinite(yMin) || !Number.isFinite(yMax)) {
+    return (
+      <div className="flex h-48 items-center justify-center rounded-2xl border border-white/10 bg-slate-950/40 text-sm text-slate-500">
+        {emptyLabel || 'No data yet.'}
+      </div>
+    )
+  }
+  if (yMax === yMin) {
+    const delta = Math.abs(yMin) || 1
+    yMin -= delta * 0.5
+    yMax += delta * 0.5
+  } else {
+    const pad = (yMax - yMin) * 0.08
+    yMin -= pad
+    yMax += pad
+    if (actualYMin >= 0 && yMin < 0) yMin = 0
+  }
+
+  const xScale = (value) => margin.left + ((value - xMin) / (xMax - xMin)) * innerWidth
+  const yScale = (value) => margin.top + innerHeight - ((value - yMin) / (yMax - yMin)) * innerHeight
+
+  const xTicks = linearTicks(xMin, xMax, 4)
+  const yTicks = linearTicks(yMin, yMax, 4)
+
+  const axisColor = 'rgba(148, 163, 184, 0.4)'
+  const gridColor = 'rgba(148, 163, 184, 0.15)'
+  const labelColor = '#cbd5f5'
+  const tickLabelColor = '#94a3b8'
+
+  return (
+    <div className="flex flex-col gap-4">
+      <svg viewBox={`0 0 ${viewWidth} ${viewHeight}`} className="h-56 w-full" preserveAspectRatio="none">
+        {yTicks.map((tick) => {
+          const y = yScale(tick)
+          return (
+            <line
+              key={`grid-y-${tick}`}
+              x1={margin.left}
+              x2={viewWidth - margin.right}
+              y1={y}
+              y2={y}
+              stroke={gridColor}
+              strokeWidth={1}
+            />
+          )
+        })}
+        {xTicks.map((tick) => {
+          const x = xScale(tick)
+          return (
+            <line
+              key={`grid-x-${tick}`}
+              x1={x}
+              x2={x}
+              y1={margin.top}
+              y2={viewHeight - margin.bottom}
+              stroke={gridColor}
+              strokeWidth={1}
+            />
+          )
+        })}
+        <line
+          x1={margin.left}
+          x2={margin.left}
+          y1={margin.top}
+          y2={viewHeight - margin.bottom}
+          stroke={axisColor}
+          strokeWidth={1.5}
+        />
+        <line
+          x1={margin.left}
+          x2={viewWidth - margin.right}
+          y1={viewHeight - margin.bottom}
+          y2={viewHeight - margin.bottom}
+          stroke={axisColor}
+          strokeWidth={1.5}
+        />
+        {xTicks.map((tick) => {
+          const x = xScale(tick)
+          return (
+            <g key={`tick-x-${tick}`}>
+              <line
+                x1={x}
+                x2={x}
+                y1={viewHeight - margin.bottom}
+                y2={viewHeight - margin.bottom + 6}
+                stroke={axisColor}
+                strokeWidth={1}
+              />
+              <text
+                x={x}
+                y={viewHeight - margin.bottom + 20}
+                fill={tickLabelColor}
+                fontSize={12}
+                textAnchor="middle"
+              >
+                {typeof xFormatter === 'function' ? xFormatter(tick) : tick.toFixed(1)}
+              </text>
+            </g>
+          )
+        })}
+        {yTicks.map((tick) => {
+          const y = yScale(tick)
+          return (
+            <g key={`tick-y-${tick}`}>
+              <line
+                x1={margin.left - 6}
+                x2={margin.left}
+                y1={y}
+                y2={y}
+                stroke={axisColor}
+                strokeWidth={1}
+              />
+              <text
+                x={margin.left - 10}
+                y={y + 4}
+                fill={tickLabelColor}
+                fontSize={12}
+                textAnchor="end"
+              >
+                {typeof yFormatter === 'function' ? yFormatter(tick) : tick.toFixed(1)}
+              </text>
+            </g>
+          )
+        })}
+        {xLabel && (
+          <text
+            x={(margin.left + viewWidth - margin.right) / 2}
+            y={viewHeight - 6}
+            fill={labelColor}
+            fontSize={12}
+            textAnchor="middle"
+          >
+            {xLabel}
+          </text>
+        )}
+        {yLabel && (
+          <text
+            x={16}
+            y={(margin.top + viewHeight - margin.bottom) / 2}
+            fill={labelColor}
+            fontSize={12}
+            textAnchor="middle"
+            transform={`rotate(-90 16 ${(margin.top + viewHeight - margin.bottom) / 2})`}
+          >
+            {yLabel}
+          </text>
+        )}
+        {processedSeries.map((seriesItem) => {
+          if (!seriesItem.points.length) return null
+          const d = seriesItem.points
+            .map((pt, idx) => `${idx === 0 ? 'M' : 'L'}${xScale(pt.x)} ${yScale(pt.y)}`)
+            .join(' ')
+          const lastPoint = seriesItem.points[seriesItem.points.length - 1]
+          return (
+            <g key={seriesItem.label ?? seriesItem._idx}>
+              <path
+                d={d}
+                fill="none"
+                stroke={seriesItem.color || '#38bdf8'}
+                strokeWidth={2.4}
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              />
+              {lastPoint ? (
+                <circle
+                  cx={xScale(lastPoint.x)}
+                  cy={yScale(lastPoint.y)}
+                  r={3.6}
+                  fill={seriesItem.color || '#38bdf8'}
+                />
+              ) : null}
+            </g>
+          )
+        })}
+      </svg>
+      <div className="flex flex-wrap gap-4 text-xs text-slate-400">
+        {series.map((s, idx) => {
+          const hasData = processedSeries[idx]?.points?.length > 0
+          return (
+            <span key={s.label ?? idx} className={`flex items-center gap-2 ${hasData ? 'text-slate-300' : 'text-slate-600'}`}>
+              <span
+                className="inline-block h-2.5 w-2.5 rounded-full"
+                style={{
+                  backgroundColor: s.color || '#38bdf8',
+                  opacity: hasData ? 1 : 0.35,
+                }}
+              />
+              {s.label}
+            </span>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function linearTicks(min, max, count) {
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return []
+  if (count <= 0 || min === max) return [min]
+  const step = (max - min) / Math.max(count, 1)
+  const ticks = []
+  for (let i = 0; i <= count; i++) ticks.push(min + step * i)
+  return ticks
 }
