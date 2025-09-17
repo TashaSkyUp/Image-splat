@@ -1,5 +1,6 @@
 export const WORKER_SRC = `
   const EPS = 1e-6;
+  const COLOR_PRECISION = 20;
   const clamp = (x, lo, hi) => Math.min(Math.max(x, lo), hi);
   function buildTileBinsFromArrays(muA, sInvA, H, W, tileH, tileW) {
     if (!muA || !sInvA) {
@@ -73,6 +74,10 @@ export const WORKER_SRC = `
         for (let y = y0; y < y1; y++) {
           for (let x = x0; x < x1; x++) {
             const cx = x / (W - 1), cy = y / (H - 1);
+            const baseGlobal = (y * W + x) * 3;
+            const tR = IMG[baseGlobal + 0];
+            const tG = IMG[baseGlobal + 1];
+            const tB = IMG[baseGlobal + 2];
             const topIdx = [];
             const topVal = [];
             const scan = (i) => {
@@ -82,13 +87,25 @@ export const WORKER_SRC = `
               const c = Math.cos(th), s = Math.sin(th);
               const dxp = c * dx + s * dy;
               const dyp = -s * dx + c * dy;
-              const sx = s_inv[i * 2 + 0], sy = s_inv[i * 2 + 1];
+              const sx = Math.max(s_inv[i * 2 + 0], EPS);
+              const sy = Math.max(s_inv[i * 2 + 1], EPS);
               const z = (dxp * sx) * (dxp * sx) + (dyp * sy) * (dyp * sy);
-              const g = Math.exp(-0.5 * z);
+              const spatial = Math.exp(-0.5 * z) * sx * sy;
+              if (spatial <= 0) return;
+              const cr = color[i * 3 + 0];
+              const cg = color[i * 3 + 1];
+              const cb = color[i * 3 + 2];
+              const dR = tR - cr;
+              const dG = tG - cg;
+              const dB = tB - cb;
+              const colorDist = dR * dR + dG * dG + dB * dB;
+              const colorWeight = Math.exp(-0.5 * colorDist * COLOR_PRECISION);
+              const weight = spatial * colorWeight;
+              if (weight <= 0) return;
               if (topIdx.length < K) {
                 let j = topIdx.length;
                 topIdx.push(i);
-                topVal.push(g);
+                topVal.push(weight);
                 while (j > 0 && topVal[j] > topVal[j - 1]) {
                   const ti = topIdx[j - 1];
                   topIdx[j - 1] = topIdx[j];
@@ -98,9 +115,9 @@ export const WORKER_SRC = `
                   topVal[j] = tv;
                   j--;
                 }
-              } else if (g > topVal[topVal.length - 1]) {
+              } else if (weight > topVal[topVal.length - 1]) {
                 topIdx[topIdx.length - 1] = i;
-                topVal[topVal.length - 1] = g;
+                topVal[topVal.length - 1] = weight;
                 let j = topIdx.length - 1;
                 while (j > 0 && topVal[j] > topVal[j - 1]) {
                   const ti = topIdx[j - 1];
@@ -120,16 +137,15 @@ export const WORKER_SRC = `
             }
             let wsum = EPS;
             for (let k = 0; k < topVal.length; k++) wsum += topVal[k];
-            const baseGlobal = (y * W + x) * 3;
             const cxn = cx;
             const cyn = cy;
-            let r = 0, g = 0, b = 0;
+            let r = 0, gOut = 0, b = 0;
             for (let k = 0; k < topIdx.length; k++) {
               const wi = topVal[k] / wsum;
               topVal[k] = wi;
               const gi = topIdx[k];
               r += wi * color[gi * 3 + 0];
-              g += wi * color[gi * 3 + 1];
+              gOut += wi * color[gi * 3 + 1];
               b += wi * color[gi * 3 + 2];
               accW[gi] += wi;
               accTW[gi * 3 + 0] += wi * IMG[baseGlobal + 0];
@@ -141,11 +157,8 @@ export const WORKER_SRC = `
               accYY[gi] += wi * cyn * cyn;
               accXY[gi] += wi * cxn * cyn;
             }
-            const tR = IMG[baseGlobal + 0];
-            const tG = IMG[baseGlobal + 1];
-            const tB = IMG[baseGlobal + 2];
             const residual =
-              (Math.abs(tR - r) + Math.abs(tG - g) + Math.abs(tB - b)) / 3;
+              (Math.abs(tR - r) + Math.abs(tG - gOut) + Math.abs(tB - b)) / 3;
             const cx2 = cxn * cxn;
             const cy2 = cyn * cyn;
             const cxy = cxn * cyn;
@@ -164,7 +177,7 @@ export const WORKER_SRC = `
               const row = y - y0Stripe;
               const baseLocal = (row * W + x) * 3;
               out[baseLocal + 0] = r;
-              out[baseLocal + 1] = g;
+              out[baseLocal + 1] = gOut;
               out[baseLocal + 2] = b;
             }
           }
