@@ -736,7 +736,10 @@ export async function startTraining() {
   try {
     await waitAllReady();
   } catch (e) {
-    console.error(e);
+    console.error("Worker pool initialization failed:", e);
+    state.status = "error";
+    notifyUI();
+    return;
   }
   state.status = "training";
   notifyUI();
