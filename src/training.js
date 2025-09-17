@@ -766,7 +766,7 @@ export function serializeModel() {
   const N = mu.length / 2;
   const headerObj = { magic: "IGS1", H, W, C: 3, N };
   const headerStr = JSON.stringify(headerObj) + "\n";
-  const header = new Uint8Array(headerStr.split("").map((ch) => ch.charCodeAt(0) & 0xff));
+  const header = new TextEncoder().encode(headerStr);
   const muQ = float16Quantize(mu);
   const sQ = float16Quantize(s_inv);
   const thQ = float16Quantize(theta);
