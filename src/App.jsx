@@ -85,10 +85,10 @@ export default function ImageGSApp() {
 
   const [K, setK] = useState(6)
   const [budget, setBudget] = useState(2000)
+  const [startSplats, setStartSplats] = useState(1000)
   const [lambdaInit, setLambdaInit] = useState(0.3)
   const [steps, setSteps] = useState(1500)
   const [stepDelayMs, setStepDelayMs] = useState(0)
-  const [addEvery, setAddEvery] = useState(400)
 
   const [lrColor, setLrColor] = useState(0.4)
   const [lrMu, setLrMu] = useState(0.25)
@@ -128,6 +128,13 @@ export default function ImageGSApp() {
   useEffect(() => {
     rebuildPool(poolSize, true)
   }, [poolSize])
+
+  useEffect(() => {
+    setStartSplats((prev) => {
+      const next = Math.max(1, Math.min(prev || 1, budget))
+      return next === prev ? prev : next
+    })
+  }, [budget])
 
   useEffect(() => {
     baselineRef.current = baselineSizes
@@ -315,7 +322,8 @@ export default function ImageGSApp() {
 
   async function initParamsJS() {
     if (!imgJS) return
-    const { vars, count } = initializeParameters(imgJS, budget, lambdaInit)
+    const startCount = Math.max(1, Math.min(budget, Math.floor(startSplats) || 1))
+    const { vars, count } = initializeParameters(imgJS, startCount, lambdaInit)
     varsRef.current = vars
     curNgRef.current = count
     broadcastSetTiling()
@@ -456,9 +464,24 @@ export default function ImageGSApp() {
     const pool = poolRef.current
     if (!pool.workers.length) return
     const Ntotal = budget
-    const addChunk = Math.max(1, Math.floor(Ntotal / 8))
+    const startCount = Math.max(1, Math.min(Ntotal, curNgRef.current || Math.floor(startSplats) || 1))
+    const targetGrowth = Math.max(0, Ntotal - startCount)
+    const milestones = (() => {
+      if (!Number.isFinite(steps) || steps <= 0) return []
+      const interval = steps / 10
+      const uniq = new Set()
+      for (let i = 1; i <= 10; i++) {
+        const raw = Math.ceil(interval * i)
+        if (raw <= 0) continue
+        uniq.add(clamp(raw, 1, steps))
+      }
+      return Array.from(uniq)
+        .filter((step) => step <= steps)
+        .sort((a, b) => a - b)
+    })()
+    const milestoneQueue = targetGrowth > 0 ? [...milestones] : []
+    let remainingToAllocate = targetGrowth
     const { w: W, h: H } = imgSize
-    const addFrequency = addEvery > 0 ? addEvery : null
 
     let lastStep = 0
 
@@ -507,8 +530,18 @@ export default function ImageGSApp() {
 
       recordModelStats(step, { psnr: ps, igsBytes })
 
-      if (addFrequency && step % addFrequency === 0 && curNgRef.current < Ntotal) {
-        await addGaussiansByErrorJS(Math.min(addChunk, Ntotal - curNgRef.current))
+      while (milestoneQueue.length && step >= milestoneQueue[0] && remainingToAllocate > 0) {
+        milestoneQueue.shift()
+        const eventsLeft = Math.max(1, milestoneQueue.length + 1)
+        const planned = Math.max(1, Math.ceil(remainingToAllocate / eventsLeft))
+        const capacity = Math.max(0, Ntotal - curNgRef.current)
+        const toAdd = Math.min(planned, capacity, remainingToAllocate)
+        if (toAdd <= 0) {
+          remainingToAllocate = 0
+          break
+        }
+        await addGaussiansByErrorJS(toAdd)
+        remainingToAllocate -= toAdd
       }
       if (stepDelayMs > 0) await new Promise((r) => setTimeout(r, stepDelayMs))
       lastStep = step
@@ -721,10 +754,10 @@ export default function ImageGSApp() {
                       </label>
                       <label className="flex flex-col gap-2 text-sm text-slate-300">
                         <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Budget (N)</span>
+                          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">End splats (N)</span>
                           <InfoPopover
-                            title="Gaussian budget"
-                            description="Sets the maximum number of splats the optimizer can allocate. Larger budgets capture more nuance but require more memory and processing."
+                            title="Final Gaussian budget"
+                            description="Sets the maximum number of splats the optimizer can allocate by the last step. Higher totals capture more nuance but require additional memory and processing time."
                           />
                         </div>
                         <input
@@ -732,7 +765,32 @@ export default function ImageGSApp() {
                           value={budget}
                           min={128}
                           max={20000}
-                          onChange={(e) => setBudget(parseInt(e.target.value, 10) || 128)}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10)
+                            const next = Number.isFinite(v) ? Math.max(1, Math.min(v, 20000)) : 128
+                            setBudget(next)
+                          }}
+                          className={inputClass}
+                        />
+                      </label>
+                      <label className="flex flex-col gap-2 text-sm text-slate-300">
+                        <div className="flex items-center justify-between">
+                          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Start splats</span>
+                          <InfoPopover
+                            title="Initial splat count"
+                            description="Defines how many Gaussians are seeded before training begins. Additional splats will be added over time until the final budget is reached."
+                          />
+                        </div>
+                        <input
+                          type="number"
+                          value={startSplats}
+                          min={1}
+                          max={budget}
+                          onChange={(e) => {
+                            const v = parseInt(e.target.value, 10)
+                            const next = Number.isFinite(v) ? Math.max(1, Math.min(v, budget)) : 1
+                            setStartSplats(next)
+                          }}
                           className={inputClass}
                         />
                       </label>
@@ -785,26 +843,6 @@ export default function ImageGSApp() {
                           min={0}
                           max={1000}
                           onChange={(e) => setStepDelayMs(parseInt(e.target.value, 10) || 0)}
-                          className={inputClass}
-                        />
-                      </label>
-                      <label className="flex flex-col gap-2 text-sm text-slate-300">
-                        <div className="flex items-center justify-between">
-                          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400">Add splats every</span>
-                          <InfoPopover
-                            title="Auto-growth cadence"
-                            description="Determines how often new Gaussians are introduced based on reconstruction error. Set to 0 to keep the count fixed."
-                          />
-                        </div>
-                        <input
-                          type="number"
-                          value={addEvery}
-                          min={0}
-                          max={5000}
-                          onChange={(e) => {
-                            const v = parseInt(e.target.value, 10)
-                            setAddEvery(Number.isFinite(v) ? Math.max(0, v) : 0)
-                          }}
                           className={inputClass}
                         />
                       </label>
