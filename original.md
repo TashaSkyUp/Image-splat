@@ -14,6 +14,10 @@ import React, { useEffect, useRef, useState } from "react";
  *    progressive add‑by‑error; trains COLORS + μ + θ + s⁻¹ on CPU.
  *  • UI draws at a fixed ~10Hz (every 100ms) regardless of step cadence.
  *  • Downscales the preview to max 512px on the long side before training.
+ *
+ * NOTE: The live code now factors the worker/training orchestration into
+ * `src/training.js`; this file captures the legacy single-file layout for
+ * reference.
  */
 
 // ------------------------------------------------------------
