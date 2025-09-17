@@ -1,6 +1,6 @@
 import { clamp, cpuTopKIndices, sobelMagJS, samplePositionsAndColorsJS } from './gaussianMath'
 
-export function initializeParameters(image, budget, lambdaInit) {
+export function initializeParameters(image, startCount, lambdaInit) {
   const { w, h, data } = image
   const grad = sobelMagJS(data, w, h)
   let sum = 0
@@ -9,7 +9,7 @@ export function initializeParameters(image, budget, lambdaInit) {
   const probs = new Float32Array(w * h)
   for (let i = 0; i < w * h; i++) probs[i] = (1 - lambdaInit) * (grad[i] / (sum || 1)) + lambdaInit * uniform
 
-  const Ng0 = Math.max(1, Math.floor(budget / 2))
+  const Ng0 = Math.max(1, Math.min(Math.floor(startCount) || 1, w * h))
   const { mu, colors } = samplePositionsAndColorsJS(data, w, h, probs, Ng0)
   const s_inv = new Float32Array(Ng0 * 2)
   for (let i = 0; i < Ng0; i++) {

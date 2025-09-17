@@ -10,6 +10,10 @@ export function sourceToF32RGB(src, targetMax = 512) {
   const ctx = c.getContext('2d', { willReadFrequently: true })
   if (!ctx) throw new Error('Canvas 2D context unavailable')
   try {
+    ctx.imageSmoothingEnabled = true
+    if ('imageSmoothingQuality' in ctx) {
+      ctx.imageSmoothingQuality = 'high'
+    }
     ctx.drawImage(src, 0, 0, w, h)
   } catch (err) {
     console.error('Rasterization failed (drawImage)', err)
