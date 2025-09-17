@@ -108,6 +108,8 @@ export default function ImageGSApp() {
   const baselineRef = useRef(baselineSizes)
   const baselineJobRef = useRef(0)
   const runStartedAtRef = useRef(null)
+  const runIdRef = useRef(0)
+  const pendingCompressionRef = useRef([])
 
   const canvasRef = useRef(null)
   const fileInputRef = useRef(null)
@@ -129,6 +131,7 @@ export default function ImageGSApp() {
 
   useEffect(() => {
     baselineRef.current = baselineSizes
+    flushPendingCompressionSamples()
   }, [baselineSizes])
 
   function destroyPool() {
@@ -263,6 +266,7 @@ export default function ImageGSApp() {
       setMetrics({ step: 0, psnr: null, n: 0, mode: 'js', worker: true, pool: poolSize, igsBytes: null })
       setPsnrHistory([])
       setCompressionHistory([])
+      pendingCompressionRef.current = []
       setBaselineSizes({ source: file.size ?? null, png: null, jpg: null })
       runStartedAtRef.current = null
       computeBaselines({ data: localData, w: js.w, h: js.h }, file.size ?? null)
@@ -331,9 +335,12 @@ export default function ImageGSApp() {
   async function train() {
     if (!imgJS) return
     setStatus('initializing')
+    runIdRef.current += 1
+    const runId = runIdRef.current
     stopRef.current = false
     setPsnrHistory([])
     setCompressionHistory([])
+    pendingCompressionRef.current = []
     runStartedAtRef.current = typeof performance !== 'undefined' ? performance.now() : Date.now()
     await initParamsJS()
     const initialBytes = estimateIgsSizeBytes(varsRef.current, imgSize)
@@ -352,7 +359,9 @@ export default function ImageGSApp() {
     }
     setStatus('training')
     await trainJS_pool()
-    setStatus('done')
+    if (runIdRef.current === runId) {
+      setStatus(stopRef.current ? 'stopped' : 'done')
+    }
   }
 
   function recordModelStats(step, { psnr, igsBytes }) {
@@ -369,26 +378,47 @@ export default function ImageGSApp() {
     }
 
     if (Number.isFinite(igsBytes) && igsBytes > 0) {
-      const base = baselineRef.current
-      const pngBytes = base?.png
-      const jpgBytes = base?.jpg
-      if (Number.isFinite(pngBytes) && pngBytes > 0 && Number.isFinite(jpgBytes) && jpgBytes > 0) {
-        setCompressionHistory((prev) => {
-          const next = [
-            ...prev,
-            {
-              time: timeSec,
-              step,
-              igsBytes,
-              pngRatio: pngBytes / igsBytes,
-              jpgRatio: jpgBytes / igsBytes,
-            },
-          ]
-          if (next.length > MAX_HISTORY_POINTS) next.splice(0, next.length - MAX_HISTORY_POINTS)
-          return next
-        })
-      }
+      queueCompressionSample({ time: timeSec, step, igsBytes })
     }
+  }
+
+  function queueCompressionSample(sample) {
+    if (!sample || !Number.isFinite(sample.igsBytes) || sample.igsBytes <= 0) return
+    pendingCompressionRef.current.push(sample)
+    flushPendingCompressionSamples()
+  }
+
+  function flushPendingCompressionSamples() {
+    const pending = pendingCompressionRef.current
+    if (!pending.length) return
+    const base = baselineRef.current
+    const pngBytes = base?.png
+    const jpgBytes = base?.jpg
+    if (!Number.isFinite(pngBytes) || pngBytes <= 0 || !Number.isFinite(jpgBytes) || jpgBytes <= 0) {
+      return
+    }
+    const ready = pending
+      .splice(0, pending.length)
+      .map((sample) => {
+        if (!Number.isFinite(sample.igsBytes) || sample.igsBytes <= 0) return null
+        const pngRatio = pngBytes / sample.igsBytes
+        const jpgRatio = jpgBytes / sample.igsBytes
+        if (!Number.isFinite(pngRatio) || !Number.isFinite(jpgRatio)) return null
+        return {
+          time: sample.time,
+          step: sample.step,
+          igsBytes: sample.igsBytes,
+          pngRatio,
+          jpgRatio,
+        }
+      })
+      .filter(Boolean)
+    if (!ready.length) return
+    setCompressionHistory((prev) => {
+      const next = [...prev, ...ready]
+      if (next.length > MAX_HISTORY_POINTS) next.splice(0, next.length - MAX_HISTORY_POINTS)
+      return next
+    })
   }
 
   function applyAccumulatorUpdate(pkg) {
